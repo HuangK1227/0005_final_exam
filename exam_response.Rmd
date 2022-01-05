@@ -1,0 +1,719 @@
+---
+title: "Name: Yanpu Huang"
+author: 
+- |
+    | Student number: 20032991
+date: "`r format(Sys.time(), '%X, %d %B, %Y')`"
+output: html_document
+---
+# Originality declaration  
+
+I, [**Yanpu Huang**], confirm that the work presented in this assessment is my own. Where information has been derived from other sources, I confirm that this has been indicated in the work.
+
+date: `r format(Sys.time(), '%d %B, %Y')`
+
+# Start your response here
+
+## Initial project scope
+
+- Find the spatial pattern of adults obesity in London boroughs.
+- Analyse the linear correlation between adult obesity and several nutrients in food in each London boroughs
+
+## Packages
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tmap)
+library(rgdal)
+library(broom)
+library(mapview)
+library(crosstalk)
+library(sf)
+library(sp)
+library(spdep)
+library(car)
+library(fs)
+library(janitor)
+library(here)
+library(landsat)
+library(broom)
+library(tidypredict)
+library(spatstat)
+library(here)
+library(sp)
+library(rgeos)
+library(maptools)
+library(GISTools)
+library(geojson)
+library(geojsonio)
+library(tmaptools)
+library(spatialreg)
+library(spgwr)
+```
+
+
+## Datasets selection
+year_borough_grocery.csv: https://figshare.com/articles/dataset/Area-level_grocery_purchases/7796666?file=18848321
+london_obesity_borough_2012.csv: https://figshare.com/articles/dataset/Validation_data_obesity_diabetes_/7796672?file=14510789
+
+London_Borough_Excluding_MHW.shp: https://data.london.gov.uk/dataset/statistical-gis-boundary-files-london
+
+## Data processing
+
+Read the datasets from “data” file. 
+```{r}
+LondonBoroughs <- st_read(here::here("data", "statistical-gis-boundaries-london", "ESRI", "London_Borough_Excluding_MHW.shp")) %>%
+  st_transform(., 27700) %>%
+  clean_names()
+
+obesity <- read_csv(here::here("data", "london_obesity_borough_2012.csv")) %>%
+  clean_names()
+
+grocery <- read_csv(here::here("data", "year_borough_grocery.csv")) %>%
+    clean_names()
+
+# msoa <- read_csv(here::here("data", "msoa-data.csv")) %>%
+#     clean_names()
+
+lb_profile1 <- LondonBoroughs%>%
+   merge(.,
+        obesity, 
+        by.x="gss_code", 
+        by.y="oslaua",
+        no.dups = TRUE)%>%
+  distinct(.,gss_code, 
+           .keep_all = TRUE)
+
+lb_profile2 <- lb_profile1%>%
+   merge(.,
+        grocery, 
+        by.x="gss_code", 
+        by.y="area_id",
+        no.dups = TRUE)%>%
+  distinct(.,gss_code, 
+           .keep_all = TRUE) %>%
+   mutate(total_fat = fat*num_transactions)%>%
+   mutate(total_carb = carb*num_transactions)%>%
+   mutate(total_sugar = sugar*num_transactions)%>%
+   mutate(total_salt = salt*num_transactions)%>%
+   mutate(total_protein = protein*num_transactions)%>%
+   mutate(total_saturate = saturate*num_transactions)%>%
+   mutate(total_fibre = fibre*num_transactions)%>%
+   mutate(total_alcohol = alcohol*num_transactions)
+
+lb_profile3 <- lb_profile2%>%
+  subset(., select = c(gss_code, name, f_obese, total_fat, total_carb, total_sugar, total_salt, total_protein, total_saturate, total_fibre, total_alcohol, fat, sugar, saturate, carb, fibre, protein, salt, alcohol))
+```
+
+## Spatial pattern
+
+### Density map
+
+Make the basic obesity rate map in London
+```{r}
+tmap_mode("plot")
+tm_shape(lb_profile3) +
+    tm_polygons("f_obese",
+        style="jenks",
+        palette="PuOr",
+        midpoint=NA,
+        title="obesity_rate")
+```
+We could see that the south-western of London has high obesity rate
+
+
+### Spatial auto-correlation(global)
+
+Make the coordinates data prepared for Moran’s I test and other tests, to see the spatial auto-correlation of obesity rate
+```{r warning=FALSE}
+coords_lb <- lb_profile3%>%
+  st_centroid()%>%
+  st_geometry()
+```
+
+```{r}
+plot(coords_lb,axes=TRUE)
+```
+
+```{r}
+lb_nb <- lb_profile3 %>%
+  poly2nb(., queen=T)
+
+summary(lb_nb)
+```
+
+```{r}
+#plot them
+plot(lb_nb, st_geometry(coords_lb), col="red")
+#add a map underneath
+plot(lb_profile3$geometry, add=T)
+```
+
+```{r}
+lb.lw <- lb_nb %>%
+  nb2mat(., style="B")
+
+sum(lb.lw)
+sum(lb.lw[,1])
+```
+
+```{r}
+lb.lw <- lb_nb %>%
+  nb2listw(., style="C")
+lb.lw
+```
+
+Do the several spatial model tests
+```{r}
+i_lb_global_obesity <- lb_profile3 %>%
+  pull(f_obese) %>%
+  as.vector()%>%
+  moran.test(., lb.lw)
+
+i_lb_global_obesity
+
+c_lb_global_obesity <- lb_profile3 %>%
+  pull(f_obese) %>%
+  as.vector()%>%
+  geary.test(., lb.lw)
+
+c_lb_global_obesity
+
+g_lb_global_obesity <-  lb_profile3 %>%
+  pull(f_obese) %>%
+  as.vector()%>%
+  globalG.test(., lb.lw)
+
+g_lb_global_obesity
+```
+- The Moran’s I: statistic > 0, positive auto-correlation
+- The Geary’s C: statistic < 1, postive auto-correlation
+- The General G: statistic < expected, but really close,so normal values are tending to cluster.
+
+So we could say the spatial auto-correlation of obesity rate in London is very slightly positive.
+
+Then focus on local moran
+```{r}
+I_lb_Local_obesity <- lb_profile3 %>%
+  pull(f_obese) %>%
+  as.vector()%>%
+  localmoran(., lb.lw)%>%
+  as_tibble()
+
+
+slice_head(I_lb_Local_obesity, n=5)
+```
+
+```{r}
+lb_profile3 <- lb_profile3 %>%
+  mutate(count_I = as.numeric(I_lb_Local_obesity$Ii))%>%
+  mutate(count_Iz =as.numeric(I_lb_Local_obesity$Z.Ii))%>%
+  mutate(density_I =as.numeric(I_lb_Local_obesity$Ii))%>%
+  mutate(density_Iz =as.numeric(I_lb_Local_obesity$Z.Ii))
+```
+
+Plot the local moran z score map
+
+```{r}
+breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+MoranColours<- rev(brewer.pal(8, "RdGy"))
+
+tmap_mode("plot")
+tm_shape(lb_profile3) +
+    tm_polygons("count_Iz",
+        style="fixed",
+        breaks=breaks1,
+        palette=MoranColours,
+        midpoint=NA,
+        title="Local Moran's I z score, adult obesity rate in London boroughs")
+```
+Plot the local Gi* map
+```{r}
+Gi_lb_Local_Obesity <- lb_profile3 %>%
+  pull(f_obese) %>%
+  as.vector()%>%
+  localG(., lb.lw)
+
+head(Gi_lb_Local_Obesity)
+```
+
+```{r}
+lb_profile3 <- lb_profile3 %>%
+  mutate(obesity_G = as.numeric(Gi_lb_Local_Obesity))
+
+GIColours<- rev(brewer.pal(8, "RdBu"))
+
+tmap_mode("plot")
+tm_shape(lb_profile3) +
+    tm_polygons("obesity_G",
+        style="fixed",
+        breaks=breaks1,
+        palette=GIColours,
+        midpoint=NA,
+        title="local Gi*, Adult obesity in London boroughs ")
+```
+
+## Analysis
+
+Now we gonna make the analysis by models and data visualisation
+qplot to see the linear regression's fitted line of raw data
+
+```{r}
+q1 <- qplot(x = `total_fat`, 
+           y = `f_obese`, 
+           data=lb_profile3)
+q1 + stat_smooth(method="lm", se=FALSE, size=1) + 
+  geom_jitter()
+
+q2 <- qplot(x = `total_sugar`, 
+           y = `f_obese`, 
+           data=lb_profile3)
+q2 + stat_smooth(method="lm", se=FALSE, size=1) + 
+  geom_jitter()
+
+q3 <- qplot(x = `total_saturate`, 
+           y = `f_obese`, 
+           data=lb_profile3)
+q3 + stat_smooth(method="lm", se=FALSE, size=1) + 
+  geom_jitter()
+
+q4 <- qplot(x = `total_carb`, 
+           y = `f_obese`, 
+           data=lb_profile3)
+q4 + stat_smooth(method="lm", se=FALSE, size=1) + 
+  geom_jitter()
+
+q5 <- qplot(x = `total_fibre`, 
+           y = `f_obese`, 
+           data=lb_profile3)
+q5 + stat_smooth(method="lm", se=FALSE, size=1) + 
+  geom_jitter()
+
+```
+Distribution seems like not following the normal distribution, so we need to check it in next the step
+
+### Data distribution
+
+Make distribution histogram to check if it is follow normal distribution.
+```{r}
+
+#dependent variable
+ggplot(lb_profile3, aes(x=f_obese)) + 
+  geom_histogram(aes(y = ..density..))+
+  geom_density(colour="red",
+               size=1,
+               adjust=1)
+
+#independent variables
+ggplot(lb_profile3, aes(x=total_fat)) + 
+  geom_histogram(aes(y = ..density..))+
+  geom_density(colour="red",
+               size=1,
+               adjust=1)
+
+ggplot(lb_profile3, aes(x=total_sugar)) + 
+  geom_histogram(aes(y = ..density..))+
+  geom_density(colour="red",
+               size=1,
+               adjust=1)
+
+ggplot(lb_profile3, aes(x=total_saturate)) + 
+  geom_histogram(aes(y = ..density..))+
+  geom_density(colour="red",
+               size=1,
+               adjust=1)
+
+ggplot(lb_profile3, aes(x=total_carb)) + 
+  geom_histogram(aes(y = ..density..))+
+  geom_density(colour="red",
+               size=1,
+               adjust=1)
+
+ggplot(lb_profile3, aes(x=total_fibre)) + 
+  geom_histogram(aes(y = ..density..))+
+  geom_density(colour="red",
+               size=1,
+               adjust=1)
+
+ggplot(lb_profile3, aes(x=fat)) + 
+  geom_histogram(aes(y = ..density..))+
+  geom_density(colour="red",
+               size=1,
+               adjust=1)
+
+
+```
+Most independents unfollow the normal distribution
+Do the log transform or exponential transform, to fit log-normal distribution or exponential-normal distribution
+
+
+Use box-plot to see if we should select log or exponential
+```{r}
+symbox(~f_obese, 
+       lb_profile3, 
+       na.rm=T,
+       powers=seq(-3,3,by=.5))
+
+symbox(~total_fat, 
+       lb_profile3, 
+       na.rm=T,
+       powers=seq(-3,3,by=.5))
+
+symbox(~total_sugar, 
+       lb_profile3, 
+       na.rm=T,
+       powers=seq(-3,3,by=.5))
+
+symbox(~total_saturate, 
+       lb_profile3, 
+       na.rm=T,
+       powers=seq(-3,3,by=.5))
+
+symbox(~total_carb, 
+       lb_profile3, 
+       na.rm=T,
+       powers=seq(-3,3,by=.5))
+
+symbox(~total_fibre, 
+       lb_profile3, 
+       na.rm=T,
+       powers=seq(-3,3,by=.5))
+
+symbox(~carb, 
+       lb_profile3, 
+       na.rm=T,
+       powers=seq(-3,3,by=.5))
+
+```
+
+According to box-plot, we could find that exponential(^0.5) is a suitable transform for out data to fit normal distribution
+
+```{r}
+ggplot(lb_profile3, aes(x=f_obese^0.5)) + 
+  geom_histogram()
+
+ggplot(lb_profile3, aes(x=total_fat^0.5)) + 
+  geom_histogram()
+
+ggplot(lb_profile3, aes(x=total_sugar^0.5)) + 
+  geom_histogram()
+
+ggplot(lb_profile3, aes(x=total_saturate^0.5)) + 
+  geom_histogram()
+
+ggplot(lb_profile3, aes(x=total_carb^0.5)) + 
+  geom_histogram()
+
+ggplot(lb_profile3, aes(x=total_fibre^0.5)) + 
+  geom_histogram()
+
+```
+
+### Ols linear regression model
+
+Using the variables we make the distribution transforming, and do the ols regression model, compare r-square, p-value, vif-value, coefficient and find the best model.
+
+```{r}
+model1 <- lb_profile3%>%
+  lm(f_obese ~ total_fat+total_sugar+total_saturate+total_carb+total_fibre, data = .)
+
+tidy(model1)
+glance(model1)
+vif(model1)
+```
+
+The p-value is too high in model1
+Also vif value is high too.
+
+```{r}
+model2 <- lb_profile3%>%
+  lm(I(f_obese^0.5) ~ I(total_fat^0.5)+ I(total_sugar^0.5) + I(total_saturate^0.5)+ I(total_carb^0.5)+I(total_fibre^0.5), data = .)
+
+tidy(model2)
+glance(model2)
+vif(model2)
+```
+The vif value is too high in model2, but the number_transactions' multiple should be concerned about, because it is using total number of each nutrient
+
+```{r}
+model3 <- lb_profile3%>%
+  lm(f_obese^0.5 ~ fat+sugar+saturate+carb+fibre, data = .)
+
+tidy(model3)
+glance(model3)
+vif(model3)
+```
+
+Low p value and nice r-square perfomed in model3, and the vif value is lower than 10 too, so means low correlation and multicolinearity
+
+Make the residuals distributino histogram, check if they are following the normal distribution
+```{r}
+model_data1 <- model1 %>%
+  augment(., lb_profile3)
+model_data2 <- model2 %>%
+  augment(., lb_profile3)
+model_data3 <- model3 %>%
+  augment(., lb_profile3)
+
+
+#plot residuals
+model_data1%>%
+dplyr::select(.resid)%>%
+  pull()%>%
+  qplot()+ 
+  geom_histogram()
+
+model_data2%>%
+dplyr::select(.resid)%>%
+  pull()%>%
+  qplot()+ 
+  geom_histogram() 
+
+model_data3%>%
+dplyr::select(.resid)%>%
+  pull()%>%
+  qplot()+ 
+  geom_histogram() 
+```
+They seems like all fit normal distribution
+
+
+Make the residuals plot, to check the homoscedasticity
+
+```{r}
+par(mfrow=c(2,2))    #plot to 2 by 2 array
+plot(model1)
+
+par(mfrow=c(2,2))    #plot to 2 by 2 array
+plot(model2)
+
+par(mfrow=c(2,2))    #plot to 2 by 2 array
+plot(model3)
+```
+
+- Therefore, comparing all the results above. The residuals plot of model3 shows that the fitted line is better close to horizontal, and Q-Q plot is also good linear fitted, which performs the best in 3 models, means there is nearly Homoscedasticity.
+- The r-square is 0.4213574% which means about 42% of the samples of the result is persuasive and convinced, and the p-value is much lower than 0.05, which means there is little possibility of null hypothesis. 
+- VIF is all smaller than 10, which means there is low influence of multicolinearity.
+- Therefore I am choosing model3 in ols part
+
+### Spatial regression
+
+Now we need to focus on the influence of spatial auto-correlation of model3, and consider about doing the spatial regression to move the influence of spatial correlation
+
+```{r}
+DW <- durbinWatsonTest(model3)
+tidy(DW)
+```
+
+DW test(<2) shows that there is a little positive auto-spatial correlation, let’s check the residuals map of model3
+Add data of residuals of model3
+
+```{r}
+lb_profile3 <- lb_profile3 %>%
+  mutate(model3resids = residuals(model3)) %>%
+  mutate(model2resids = residuals(model2))
+```
+
+Plot the residuals map of model3
+
+```{r}
+tmap_mode("plot")
+tm_shape(lb_profile3) +
+  tm_polygons("model2resids",
+              palette = "RdYlBu")
+
+tmap_mode("plot")
+tm_shape(lb_profile3) +
+  tm_polygons("model3resids",
+              palette = "RdYlBu")
+```
+Same colors shows the spatial correlation roughly, but we need Moran's I test to check more details.
+
+Make the queen neighbors lists/ list.weight and k nearest neighbors lists/list.weight.
+```{r}
+coordsW <- lb_profile3%>%
+  st_centroid()%>%
+  st_geometry()
+
+lb_qnb <- lb_profile3 %>%
+  poly2nb(., queen=T)
+
+#or nearest neighbours
+lb_knn <-coordsW %>%
+  knearneigh(., k=4) %>%
+  knn2nb()
+
+plot(lb_qnb, st_geometry(coordsW), col="red")
+plot(lb_knn, st_geometry(coordsW), col="red")
+```
+
+```{r}
+lb.queens_weight <- lb_qnb %>%
+  nb2listw(., style="W")
+
+lb.knn_4_weight <- lb_knn %>%
+  nb2listw(., style="W")
+```
+
+Use Moran I’s test to check the spatial auto-correlation of the residuals of model3 more precisely.
+
+```{r}
+
+Queen_model3 <- lb_profile3 %>%
+  st_drop_geometry()%>%
+  dplyr::select(model3resids)%>%
+  pull()%>%
+  moran.test(., lb.queens_weight)%>%
+  tidy()
+
+K_Nearest_neighbour_model3 <- lb_profile3 %>%
+  st_drop_geometry()%>%
+  dplyr::select(model3resids)%>%
+  pull()%>%
+  moran.test(., lb.knn_4_weight)%>%
+  tidy()
+
+
+Queen_model3
+K_Nearest_neighbour_model3
+
+
+```
+
+We can now make sure low negative-spatial auto-correlation exists, then I would like using Lagrange Multiplier (LM) test to select a suitable model between the spatial Lag model and the spatial error model for same independent and dependent in model3. If the LM test does not give a suitable output, I will change to use GWR model.
+
+```{r}
+
+lb.queens_weight_ROW_model3 <- lb_qnb %>%
+  nb2listw(., style="W")
+
+lm.LMtests(model3, lb.queens_weight_ROW_model3, test = c("LMerr","LMlag","RLMerr","RLMlag","SARMA"))
+```
+
+Seems like everything's p-value is high, so I would like to do a GWR model to see the coefficient of each nutrients in boroughs.
+
+#### Geographically weighted regression Mmdel
+
+Now making a Geographically Weighted Regression Model.
+
+```{r}
+coordsW2 <- st_coordinates(coordsW)
+
+lb_profile4 <- cbind(lb_profile3,coordsW2)
+
+# GWRbandwidth <- gwr.sel(f_obese^0.5 ~ fat+sugar+saturate+carb+fibre, 
+#                  data = lb_profile4, 
+#                   data = lb_profile4, 
+#                         coords=cbind(lb_profile4$X, lb_profile4$Y),
+#                   adapt=T)
+
+# errors on finding the best bandwidth, just random pick one
+gwr.model = gwr(f_obese^0.5 ~ fat+sugar+saturate+carb+fibre, 
+                  data = lb_profile4, 
+                coords=cbind(lb_profile4$X, lb_profile4$Y), 
+                adapt=0.09016994,#if i cant find a bedt bandwidth, then set a random number
+                #matrix output
+                hatmatrix=TRUE,
+                #standard error
+                se.fit=TRUE)
+
+#print the results of the model
+gwr.model
+```
+
+```{r}
+results <- as.data.frame(gwr.model$SDF)
+names(results)
+```
+
+Plot the coefficient of these 5 variables calculated by gwr model in map.
+```{r}
+lb_profile4 <- lb_profile4 %>%
+  mutate(coef_fat = results$fat,
+         coef_sugar = results$sugar,
+         coef_saturate = results$saturate,
+         coef_carb = results$carb,
+         coef_fibre = results$fibre,)
+
+tmap_mode("view")
+tm_shape(lb_profile4) +
+  tm_polygons(col = "coef_fat", 
+              palette = "RdBu", 
+              alpha = 0.5)
+
+tmap_mode("view")
+tm_shape(lb_profile4) +
+  tm_polygons(col = "coef_sugar", 
+              palette = "RdBu", 
+              alpha = 0.5)
+
+tmap_mode("view")
+tm_shape(lb_profile4) +
+  tm_polygons(col = "coef_saturate", 
+              palette = "RdBu", 
+              alpha = 0.5)
+
+tmap_mode("view")
+tm_shape(lb_profile4) +
+  tm_polygons(col = "coef_carb", 
+              palette = "RdBu", 
+              alpha = 0.5)
+
+tmap_mode("view")
+tm_shape(lb_profile4) +
+  tm_polygons(col = "coef_fibre", 
+              palette = "RdBu", 
+              alpha = 0.5)
+```
+
+We can see here from the gwr map of how obesity be affected by several average nutrients in the food in each boroughs.
+- Fat in food has negative correlation to obesity in every boroughs.
+- Sugar in food has positive correlation to obesity in nearly every boroughs.
+- Saturate in food has positive correlation to obesity in nearly the south, east, west part of London, excep the north part.
+- Carb in food has positive correlation to obesity in south, east, west part of London.
+- Fibre in food has nearly negative correlation to obesity in every boroughs.
+
+
+Plot the sigtest(like residuals) of variables(under 18) by map
+
+```{r}
+# sigTest1 = abs(gwr.model$SDF$"fat")-2 * gwr.model$SDF$"fat_se"
+# sigTest2 = abs(gwr.model$SDF$"sugar")-2 * gwr.model$SDF$"sugar_se"
+# sigTest3 = abs(gwr.model$SDF$"saturate")-2 * gwr.model$SDF$"saturate_se"
+# sigTest4 = abs(gwr.model$SDF$"carb")-2 * gwr.model$SDF$"carb_se"
+# sigTest5 = abs(gwr.model$SDF$"fibre")-2 * gwr.model$SDF$"fibre_se"
+
+```
+
+```{r}
+# lb_profile4 <- lb_profile4 %>%
+#   mutate(fat_sig = sigTest1) %>%
+#   mutate(sugar_sig = sigTest2) %>%
+#   mutate(saturate_sig = sigTest3) %>%
+#   mutate(carb_sig = sigTest4) %>%
+#   mutate(fibre_sig = sigTest5) %>%
+# 
+# 
+# tmap_mode("view")
+# 
+# tm_shape(lb_profile4) +
+#   tm_polygons(col = "fat_sig",
+#               palette = "RdYlBu")
+# 
+# tmap_mode("view")
+# 
+# tm_shape(lb_profile4) +
+#   tm_polygons(col = "sugar_sig",
+#               palette = "RdYlBu")
+
+```
+
+## Constraints
+
+No time to fix the sig test, and mention about the conclusion about spatial pattern. 
+If sig test comes out, we can make sure the right coefficient with high significance.
+
+## Conclusion
+
+
+The sugar, saturate, carb in food has positive correlation to the adult obesity in most boroughs in London.In contract, the fibre, fat in food has negative correlation to the adult obesity. So the advice for government is to promoting for the food that contaitn high fibre, and appropriate healthy fat.
+
